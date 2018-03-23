@@ -1,0 +1,333 @@
+From 608fd6f14a6b9c0eeba2843fb14cbb235be0034f Mon Sep 17 00:00:00 2001
+From: moneromooo-monero <moneromooo-monero@users.noreply.github.com>
+Date: Wed, 7 Feb 2018 19:07:36 +0000
+Subject: [PATCH] Monero Cryptonight variants, and add one for v7
+
+This is the first variant of many, with the intent to improve
+Monero's resistance to ASICs and encourage mining decentralization.
+---
+ src/crypto/chacha.h                              |  4 +-
+ src/crypto/hash-ops.h                            |  4 +-
+ src/crypto/hash.h                                |  4 +-
+ src/crypto/slow-hash.c                           | 53 +++++++++++++++++++++---
+ src/cryptonote_basic/cryptonote_format_utils.cpp |  3 +-
+ src/device/device_ledger.cpp                     |  2 +-
+ tests/hash/CMakeLists.txt                        |  2 +-
+ tests/hash/main.cpp                              | 11 ++++-
+ tests/hash/tests-slow-1.txt                      |  5 +++
+ 9 files changed, 71 insertions(+), 17 deletions(-)
+ create mode 100644 tests/hash/tests-slow-1.txt
+
+diff --git a/src/crypto/chacha.h b/src/crypto/chacha.h
+index b45c3d7c7..22da53bd0 100644
+--- a/src/crypto/chacha.h
++++ b/src/crypto/chacha.h
+@@ -69,10 +69,10 @@ namespace crypto {
+     chacha20(data, length, key.data(), reinterpret_cast<const uint8_t*>(&iv), cipher);
+   }
+ 
+-  inline void generate_chacha_key(const void *data, size_t size, chacha_key& key, bool prehashed=false) {
++  inline void generate_chacha_key(const void *data, size_t size, chacha_key& key, int cn_variant = 0, bool prehashed=false) {
+     static_assert(sizeof(chacha_key) <= sizeof(hash), "Size of hash must be at least that of chacha_key");
+     tools::scrubbed_arr<char, HASH_SIZE> pwd_hash;
+-    crypto::cn_slow_hash_pre(data, size, pwd_hash.data(), prehashed);
++    crypto::cn_slow_hash_pre(data, size, pwd_hash.data(), cn_variant, prehashed);
+     memcpy(&key, pwd_hash.data(), sizeof(key));
+   }
+ 
+diff --git a/src/crypto/hash-ops.h b/src/crypto/hash-ops.h
+index 130bf02db..934d464de 100644
+--- a/src/crypto/hash-ops.h
++++ b/src/crypto/hash-ops.h
+@@ -79,8 +79,8 @@ enum {
+ };
+ 
+ void cn_fast_hash(const void *data, size_t length, char *hash);
+-void cn_slow_hash(const void *data, size_t length, char *hash);
+-void cn_slow_hash_pre(const void *data, size_t length, char *hash, bool pre);
++void cn_slow_hash(const void *data, size_t length, char *hash, int variant);
++void cn_slow_hash_pre(const void *data, size_t length, char *hash, int variant, bool pre);
+ 
+ void hash_extra_blake(const void *data, size_t length, char *hash);
+ void hash_extra_groestl(const void *data, size_t length, char *hash);
+diff --git a/src/crypto/hash.h b/src/crypto/hash.h
+index 14104699b..bf4f4c096 100644
+--- a/src/crypto/hash.h
++++ b/src/crypto/hash.h
+@@ -71,8 +71,8 @@ namespace crypto {
+     return h;
+   }
+ 
+-  inline void cn_slow_hash(const void *data, std::size_t length, hash &hash) {
+-    cn_slow_hash(data, length, reinterpret_cast<char *>(&hash));
++  inline void cn_slow_hash(const void *data, std::size_t length, hash &hash, int variant = 0) {
++    cn_slow_hash(data, length, reinterpret_cast<char *>(&hash), variant);
+   }
+ 
+   inline void tree_hash(const hash *hashes, std::size_t count, hash &root_hash) {
+diff --git a/src/crypto/slow-hash.c b/src/crypto/slow-hash.c
+index 36bfba9fd..5bfc93021 100644
+--- a/src/crypto/slow-hash.c
++++ b/src/crypto/slow-hash.c
+@@ -32,6 +32,8 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ #include <string.h>
++#include <stdio.h>
++#include <unistd.h>
+ 
+ #include "common/int-util.h"
+ #include "hash-ops.h"
+@@ -47,6 +49,29 @@
+ extern int aesb_single_round(const uint8_t *in, uint8_t*out, const uint8_t *expandedKey);
+ extern int aesb_pseudo_round(const uint8_t *in, uint8_t *out, const uint8_t *expandedKey);
+ 
++#define VARIANT1_1(p) \
++  do if (variant > 0) \
++  { \
++    uint8_t tmp = ((const uint8_t*)p)[11]; \
++    uint8_t tmp1 = (tmp>>4)&1, tmp2 = (tmp>>5)&1, tmp3 = tmp1^tmp2; \
++    uint8_t tmp0 = (((const uint8_t*)p)[11] & 1) ? tmp3 : ((((tmp2<<1)|tmp1) + 1)&3); \
++    ((uint8_t*)p)[11] = (((const uint8_t*)p)[11] & 1) ? ((tmp & 0xef) | (tmp0<<4)):((tmp & 0xcf) | (tmp0<<4)); \
++  } while(0)
++
++#define VARIANT1_2(p) \
++  do if (variant > 0) \
++  { \
++    ((uint32_t*)p)[2] ^= nonce; \
++  } while(0)
++
++#define VARIANT1_INIT() \
++  if (variant > 0 && length < 43) \
++  { \
++    fprintf(stderr, "Cryptonight variants need at least 43 bytes of data"); \
++    _exit(1); \
++  } \
++  const uint32_t nonce = variant > 0 ? *(const uint32_t*)(((const uint8_t*)data)+39) : 0
++
+ #if !defined NO_AES && (defined(__x86_64__) || (defined(_MSC_VER) && defined(_WIN64)))
+ // Optimised code below, uses x86-specific intrinsics, SSE2, AES-NI
+ // Fall back to more portable code is down at the bottom
+@@ -125,6 +150,7 @@ extern int aesb_pseudo_round(const uint8_t *in, uint8_t *out, const uint8_t *exp
+   _mm_store_si128(R128(c), _c); \
+   _b = _mm_xor_si128(_b, _c); \
+   _mm_store_si128(R128(&hp_state[j]), _b); \
++  VARIANT1_1(&hp_state[j]); \
+   j = state_index(c); \
+   p = U64(&hp_state[j]); \
+   b[0] = p[0]; b[1] = p[1]; \
+@@ -134,6 +160,7 @@ extern int aesb_pseudo_round(const uint8_t *in, uint8_t *out, const uint8_t *exp
+   p[0] = a[0];  p[1] = a[1]; \
+   a[0] ^= b[0]; a[1] ^= b[1]; \
+   _b = _c; \
++  VARIANT1_2(&hp_state[j]); \
+ 
+ #if defined(_MSC_VER)
+ #define THREADV __declspec(thread)
+@@ -515,11 +542,11 @@ void slow_hash_free_state(void)
+  * @param length the length in bytes of the data
+  * @param hash a pointer to a buffer in which the final 256 bit hash will be stored
+  */
+-void cn_slow_hash(const void *data, size_t length, char *hash) {
+-    cn_slow_hash_pre(data,length,hash,false);
++void cn_slow_hash(const void *data, size_t length, char *hash, int variant) {
++    cn_slow_hash_pre(data,length,hash,variant,false);
+ }
+ 
+-void cn_slow_hash_pre(const void *data, size_t length, char *hash, bool prehashed)
++void cn_slow_hash_pre(const void *data, size_t length, char *hash, int variant, bool prehashed)
+ {
+     RDATA_ALIGN16 uint8_t expandedKey[240];  /* These buffers are aligned to use later with SSE functions */
+ 
+@@ -541,6 +568,8 @@ void cn_slow_hash_pre(const void *data, size_t length, char *hash, bool prehashe
+         hash_extra_blake, hash_extra_groestl, hash_extra_jh, hash_extra_skein
+     };
+ 
++    VARIANT1_INIT();
++
+     // this isn't supposed to happen, but guard against it for now.
+     if(hp_state == NULL)
+         slow_hash_allocate_state();
+@@ -712,6 +741,7 @@ union cn_slow_hash_state
+   vst1q_u8((uint8_t *)c, _c); \
+   _b = veorq_u8(_b, _c); \
+   vst1q_u8(&hp_state[j], _b); \
++  VARIANT1_1(&hp_state[j]); \
+   j = state_index(c); \
+   p = U64(&hp_state[j]); \
+   b[0] = p[0]; b[1] = p[1]; \
+@@ -720,6 +750,7 @@ union cn_slow_hash_state
+   p = U64(&hp_state[j]); \
+   p[0] = a[0];  p[1] = a[1]; \
+   a[0] ^= b[0]; a[1] ^= b[1]; \
++  VARIANT1_2(p); \
+   _b = _c; \
+ 
+ 
+@@ -851,7 +882,7 @@ STATIC INLINE void aes_pseudo_round_xor(const uint8_t *in, uint8_t *out, const u
+ 	}
+ }
+ 
+-void cn_slow_hash(const void *data, size_t length, char *hash)
++void cn_slow_hash(const void *data, size_t length, char *hash, int variant)
+ {
+     RDATA_ALIGN16 uint8_t expandedKey[240];
+     RDATA_ALIGN16 uint8_t hp_state[MEMORY];
+@@ -872,6 +903,8 @@ void cn_slow_hash(const void *data, size_t length, char *hash)
+         hash_extra_blake, hash_extra_groestl, hash_extra_jh, hash_extra_skein
+     };
+ 
++    VARIANT1_INIT();
++
+     /* CryptoNight Step 1:  Use Keccak1600 to initialize the 'state' (and 'text') buffers from the data. */
+ 
+     hash_process(&state.hs, data, length);
+@@ -1045,7 +1078,7 @@ STATIC INLINE void xor_blocks(uint8_t* a, const uint8_t* b)
+   U64(a)[1] ^= U64(b)[1];
+ }
+ 
+-void cn_slow_hash(const void *data, size_t length, char *hash)
++void cn_slow_hash(const void *data, size_t length, char *hash, int variant)
+ {
+     uint8_t text[INIT_SIZE_BYTE];
+     uint8_t a[AES_BLOCK_SIZE];
+@@ -1064,6 +1097,8 @@ void cn_slow_hash(const void *data, size_t length, char *hash)
+         hash_extra_blake, hash_extra_groestl, hash_extra_jh, hash_extra_skein
+     };
+ 
++    VARIANT1_INIT();
++
+ #ifndef FORCE_USE_HEAP
+     uint8_t long_state[MEMORY];
+ #else
+@@ -1103,6 +1138,7 @@ void cn_slow_hash(const void *data, size_t length, char *hash)
+       xor_blocks(b, p);
+       swap_blocks(b, p);
+       swap_blocks(a, b);
++      VARIANT1_1(p);
+ 
+       // Iteration 2
+       p = &long_state[state_index(a)];
+@@ -1112,6 +1148,7 @@ void cn_slow_hash(const void *data, size_t length, char *hash)
+       swap_blocks(b, p);
+       xor_blocks(b, p);
+       swap_blocks(a, b);
++      VARIANT1_2(p);
+     }
+ 
+     memcpy(text, state.init, INIT_SIZE_BYTE);
+@@ -1216,7 +1253,7 @@ union cn_slow_hash_state {
+ };
+ #pragma pack(pop)
+ 
+-void cn_slow_hash(const void *data, size_t length, char *hash) {
++void cn_slow_hash(const void *data, size_t length, char *hash, int variant) {
+   uint8_t long_state[MEMORY];
+   union cn_slow_hash_state state;
+   uint8_t text[INIT_SIZE_BYTE];
+@@ -1228,6 +1265,8 @@ void cn_slow_hash(const void *data, size_t length, char *hash) {
+   uint8_t aes_key[AES_KEY_SIZE];
+   oaes_ctx *aes_ctx;
+ 
++  VARIANT1_INIT();
++
+   hash_process(&state.hs, data, length);
+   memcpy(text, state.init, INIT_SIZE_BYTE);
+   memcpy(aes_key, state.hs.b, AES_KEY_SIZE);
+@@ -1260,6 +1299,7 @@ void cn_slow_hash(const void *data, size_t length, char *hash) {
+     copy_block(&long_state[j * AES_BLOCK_SIZE], c);
+     assert(j == e2i(a, MEMORY / AES_BLOCK_SIZE));
+     swap_blocks(a, b);
++    VARIANT1_1(&long_state[j * AES_BLOCK_SIZE]);
+     /* Iteration 2 */
+     j = e2i(a, MEMORY / AES_BLOCK_SIZE);
+     copy_block(c, &long_state[j * AES_BLOCK_SIZE]);
+@@ -1270,6 +1310,7 @@ void cn_slow_hash(const void *data, size_t length, char *hash) {
+     copy_block(&long_state[j * AES_BLOCK_SIZE], c);
+     assert(j == e2i(a, MEMORY / AES_BLOCK_SIZE));
+     swap_blocks(a, b);
++    VARIANT1_2(&long_state[j * AES_BLOCK_SIZE]);
+   }
+ 
+   memcpy(text, state.init, INIT_SIZE_BYTE);
+diff --git a/src/cryptonote_basic/cryptonote_format_utils.cpp b/src/cryptonote_basic/cryptonote_format_utils.cpp
+index f462d1ca9..a10772424 100644
+--- a/src/cryptonote_basic/cryptonote_format_utils.cpp
++++ b/src/cryptonote_basic/cryptonote_format_utils.cpp
+@@ -1022,7 +1022,8 @@ namespace cryptonote
+       return true;
+     }
+     blobdata bd = get_block_hashing_blob(b);
+-    crypto::cn_slow_hash(bd.data(), bd.size(), res);
++    const int cn_variant = b.major_version >= 7 ? b.major_version - 6 : 0;
++    crypto::cn_slow_hash(bd.data(), bd.size(), res, cn_variant);
+     return true;
+   }
+   //---------------------------------------------------------------
+diff --git a/src/device/device_ledger.cpp b/src/device/device_ledger.cpp
+index cede834a1..571d42724 100644
+--- a/src/device/device_ledger.cpp
++++ b/src/device/device_ledger.cpp
+@@ -511,7 +511,7 @@ namespace hw {
+ 
+         char prekey[200];
+         memmove(prekey, &this->buffer_recv[0], 200);
+-        crypto::generate_chacha_key(&prekey[0], sizeof(prekey), key, true);
++        crypto::generate_chacha_key(&prekey[0], sizeof(prekey), key, 0, true);
+ 
+         #ifdef DEBUG_HWDEVICE
+         hw::ledger::check32("generate_chacha_key", "key", (char*)key_x.data(), (char*)key.data());
+diff --git a/tests/hash/CMakeLists.txt b/tests/hash/CMakeLists.txt
+index e2aca8517..92abeca20 100644
+--- a/tests/hash/CMakeLists.txt
++++ b/tests/hash/CMakeLists.txt
+@@ -43,7 +43,7 @@ set_property(TARGET hash-tests
+   PROPERTY
+     FOLDER "tests")
+ 
+-foreach (hash IN ITEMS fast slow tree extra-blake extra-groestl extra-jh extra-skein)
++foreach (hash IN ITEMS fast slow slow-1 tree extra-blake extra-groestl extra-jh extra-skein)
+   add_test(
+     NAME    "hash-${hash}"
+     COMMAND hash-tests "${hash}" "${CMAKE_CURRENT_SOURCE_DIR}/tests-${hash}.txt")
+diff --git a/tests/hash/main.cpp b/tests/hash/main.cpp
+index aa928856a..5a16284df 100644
+--- a/tests/hash/main.cpp
++++ b/tests/hash/main.cpp
+@@ -51,6 +51,12 @@ extern "C" {
+     }
+     tree_hash((const char (*)[32]) data, length >> 5, hash);
+   }
++  static void cn_slow_hash_0(const void *data, size_t length, char *hash) {
++    return cn_slow_hash(data, length, hash, 0);
++  }
++  static void cn_slow_hash_1(const void *data, size_t length, char *hash) {
++    return cn_slow_hash(data, length, hash, 1);
++  }
+ }
+ POP_WARNINGS
+ 
+@@ -58,9 +64,10 @@ extern "C" typedef void hash_f(const void *, size_t, char *);
+ struct hash_func {
+   const string name;
+   hash_f &f;
+-} hashes[] = {{"fast", cn_fast_hash}, {"slow", cn_slow_hash}, {"tree", hash_tree},
++} hashes[] = {{"fast", cn_fast_hash}, {"slow", cn_slow_hash_0}, {"tree", hash_tree},
+   {"extra-blake", hash_extra_blake}, {"extra-groestl", hash_extra_groestl},
+-  {"extra-jh", hash_extra_jh}, {"extra-skein", hash_extra_skein}};
++  {"extra-jh", hash_extra_jh}, {"extra-skein", hash_extra_skein},
++  {"slow-1", cn_slow_hash_1}};
+ 
+ int main(int argc, char *argv[]) {
+   hash_f *f;
+diff --git a/tests/hash/tests-slow-1.txt b/tests/hash/tests-slow-1.txt
+new file mode 100644
+index 000000000..0c571f86f
+--- /dev/null
++++ b/tests/hash/tests-slow-1.txt
+@@ -0,0 +1,5 @@
++b46aab7facce3eb4b4679d1d526f2d500d43736988b7881853c4c0c4af04ac0e 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++f0f0ab8a50a809ccd82c76996e494b20a1e01e90ed4814a27db2558511559091 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++13310922971e1112b382357aeaa8b0bf0cd941dc6f5e398979f3fa77d13749bd 8519e039172b0d70e5ca7b3383d6b3167315a422747b73f019cf9528f0fde341fd0f2a63030ba6450525cf6de31837669af6f1df8131faf50aaab8d3a7405589
++0d9f641d14a782748ed5548f72a20c83c4a2cfe606015ad9eda5b36a00947d72 37a636d7dafdf259b7287eddca2f58099e98619d2f99bdb8969d7b14498102cc065201c8be90bd777323f449848b215d2977c92c4c1c2da36ab46b2e389689ed97c18fec08cd3b03235c5e4c62a37ad88c7b67932495a71090e85dd4020a9300
++d74a0c9b603aa9f9af0bfec0c36d3d383c14930a0ee2f08dab44536fccda5bee 38274c97c45a172cfc97679870422e3a1ab0784960c60514d816271415c306ee3a3ed1a77e31f6a885c3cb

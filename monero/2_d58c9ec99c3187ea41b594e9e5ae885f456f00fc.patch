@@ -1,0 +1,28 @@
+From d58c9ec99c3187ea41b594e9e5ae885f456f00fc Mon Sep 17 00:00:00 2001
+From: SChernykh <SChernykh@users.noreply.github.com>
+Date: Fri, 16 Feb 2018 09:11:54 +0000
+Subject: [PATCH] slow-hash: optimized version
+
+---
+ src/crypto/slow-hash.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/crypto/slow-hash.c b/src/crypto/slow-hash.c
+index 5bfc93021..f81aadfab 100644
+--- a/src/crypto/slow-hash.c
++++ b/src/crypto/slow-hash.c
+@@ -52,10 +52,10 @@ extern int aesb_pseudo_round(const uint8_t *in, uint8_t *out, const uint8_t *exp
+ #define VARIANT1_1(p) \
+   do if (variant > 0) \
+   { \
+-    uint8_t tmp = ((const uint8_t*)p)[11]; \
+-    uint8_t tmp1 = (tmp>>4)&1, tmp2 = (tmp>>5)&1, tmp3 = tmp1^tmp2; \
+-    uint8_t tmp0 = (((const uint8_t*)p)[11] & 1) ? tmp3 : ((((tmp2<<1)|tmp1) + 1)&3); \
+-    ((uint8_t*)p)[11] = (((const uint8_t*)p)[11] & 1) ? ((tmp & 0xef) | (tmp0<<4)):((tmp & 0xcf) | (tmp0<<4)); \
++    const uint8_t tmp = ((const uint8_t*)(p))[11]; \
++    static const uint32_t table = 0x75310; \
++    const uint8_t index = (((tmp >> 3) & 6) | (tmp & 1)) << 1; \
++    ((uint8_t*)(p))[11] = tmp ^ ((table >> index) & 0x30); \
+   } while(0)
+ 
+ #define VARIANT1_2(p) \

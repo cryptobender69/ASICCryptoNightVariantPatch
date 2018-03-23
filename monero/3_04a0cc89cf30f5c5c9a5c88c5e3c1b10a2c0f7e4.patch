@@ -1,0 +1,22 @@
+From 04a0cc89cf30f5c5c9a5c88c5e3c1b10a2c0f7e4 Mon Sep 17 00:00:00 2001
+From: moneromooo-monero <moneromooo-monero@users.noreply.github.com>
+Date: Wed, 7 Mar 2018 00:44:30 +0000
+Subject: [PATCH] slow-hash: fix uint64 type typo
+
+---
+ src/crypto/slow-hash.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/crypto/slow-hash.c b/src/crypto/slow-hash.c
+index c733d7b39..8c7dad8e0 100644
+--- a/src/crypto/slow-hash.c
++++ b/src/crypto/slow-hash.c
+@@ -727,7 +727,7 @@ void slow_hash_free_state(void)
+ 
+ #define U64(x) ((uint64_t *) (x))
+ 
+-STATIC INLINE void xor64(uint64 *a, const uint64 b)
++STATIC INLINE void xor64(uint64_t *a, const uint64_t b)
+ {
+     *a ^= b;
+ }
